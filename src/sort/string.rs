@@ -1,6 +1,6 @@
 use std::num::NonZeroU32;
 
-use crate::{ast::Literal, constraint::AllEqualTypeConstraint};
+use crate::ast::Literal;
 
 use super::*;
 
@@ -27,7 +27,7 @@ impl Sort for StringSort {
     fn make_expr(&self, _egraph: &EGraph, value: Value) -> (Cost, Expr) {
         assert!(value.tag == self.name);
         let sym = Symbol::from(NonZeroU32::new(value.bits as _).unwrap());
-        (1, Expr::Lit((), Literal::String(sym)))
+        (1, Expr::Lit(Literal::String(sym)))
     }
 
     fn register_primitives(self: Arc<Self>, typeinfo: &mut TypeInfo) {
@@ -71,13 +71,15 @@ impl PrimitiveLike for Add {
         self.name
     }
 
-    fn get_type_constraints(&self) -> Box<dyn TypeConstraint> {
-        AllEqualTypeConstraint::new(self.name())
-            .with_all_arguments_sort(self.string.clone())
-            .into_box()
+    fn accept(&self, types: &[ArcSort]) -> Option<ArcSort> {
+        if types.iter().all(|t| t.name() == self.string.name) {
+            Some(self.string.clone())
+        } else {
+            None
+        }
     }
 
-    fn apply(&self, values: &[Value], _egraph: &EGraph) -> Option<Value> {
+    fn apply(&self, values: &[Value]) -> Option<Value> {
         let mut res_string: String = "".to_owned();
         for value in values {
             let sym = Symbol::load(&self.string, value);
@@ -98,14 +100,19 @@ impl PrimitiveLike for Replace {
         self.name
     }
 
-    fn get_type_constraints(&self) -> Box<dyn TypeConstraint> {
-        AllEqualTypeConstraint::new(self.name())
-            .with_all_arguments_sort(self.string.clone())
-            .with_exact_length(4)
-            .into_box()
+    fn accept(&self, types: &[ArcSort]) -> Option<ArcSort> {
+        if types.len() == 3
+            && types[0].name() == self.string.name
+            && types[1].name() == self.string.name
+            && types[2].name() == self.string.name
+        {
+            Some(self.string.clone())
+        } else {
+            None
+        }
     }
 
-    fn apply(&self, values: &[Value], _egraph: &EGraph) -> Option<Value> {
+    fn apply(&self, values: &[Value]) -> Option<Value> {
         let string1 = Symbol::load(&self.string, &values[0]).to_string();
         let string2 = Symbol::load(&self.string, &values[1]).to_string();
         let string3 = Symbol::load(&self.string, &values[2]).to_string();

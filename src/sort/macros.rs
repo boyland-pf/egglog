@@ -27,7 +27,7 @@ macro_rules! add_primitives {
         let type_info: &mut _ = $type_info;
         #[allow(unused_imports, non_snake_case)]
         {
-            use $crate::{*, sort::*, constraint::*};
+            use $crate::{*, sort::*};
 
             struct MyPrim {$(
                 $param: Arc<<$param_t as FromSort>::Sort>,
@@ -40,14 +40,21 @@ macro_rules! add_primitives {
                     $name.into()
                 }
 
-                fn get_type_constraints(
-                    &self,
-                ) -> Box<dyn TypeConstraint> {
-                    let sorts = vec![$(self.$param.clone(),)* self.__out.clone() as ArcSort];
-                    SimpleTypeConstraint::new(self.name(), sorts).into_box()
+                fn accept(&self, types: &[ArcSort]) -> Option<ArcSort> {
+                    let mut types = types.iter();
+                    $(
+                        if self.$param.name() != types.next()?.name() {
+                            return None;
+                        }
+                    )*
+                    if types.next().is_some() {
+                        None
+                    } else {
+                        Some(self.__out.clone())
+                    }
                 }
 
-                fn apply(&self, values: &[Value], _egraph: &EGraph) -> Option<Value> {
+                fn apply(&self, values: &[Value]) -> Option<Value> {
                     if let [$($param),*] = values {
                         $(let $param: $param_t = <$param_t as FromSort>::load(&self.$param, $param);)*
                         // print!("{}( ", $name);
@@ -61,8 +68,8 @@ macro_rules! add_primitives {
                 }
             }
             type_info.add_primitive($crate::Primitive::from(MyPrim {
-                $( $param: type_info.get_sort_nofail::<<$param_t as IntoSort>::Sort>(), )*
-                __out: type_info.get_sort_nofail::<<$ret as IntoSort>::Sort>(),
+                $( $param: type_info.get_sort::<<$param_t as IntoSort>::Sort>(), )*
+                __out: type_info.get_sort::<<$ret as IntoSort>::Sort>(),
             }))
         }
     }};

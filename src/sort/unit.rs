@@ -1,5 +1,5 @@
 use super::*;
-use crate::{ast::Literal, constraint::AllEqualTypeConstraint, ArcSort, PrimitiveLike};
+use crate::{ast::Literal, ArcSort, PrimitiveLike};
 
 #[derive(Debug)]
 pub struct UnitSort {
@@ -27,7 +27,7 @@ impl Sort for UnitSort {
 
     fn make_expr(&self, _egraph: &EGraph, value: Value) -> (Cost, Expr) {
         assert_eq!(value.tag, self.name);
-        (1, Expr::Lit((), Literal::Unit))
+        (1, Expr::Lit(Literal::Unit))
     }
 }
 
@@ -48,14 +48,14 @@ impl PrimitiveLike for NotEqualPrimitive {
         "!=".into()
     }
 
-    fn get_type_constraints(&self) -> Box<dyn TypeConstraint> {
-        AllEqualTypeConstraint::new(self.name())
-            .with_exact_length(3)
-            .with_output_sort(self.unit.clone())
-            .into_box()
+    fn accept(&self, types: &[ArcSort]) -> Option<ArcSort> {
+        match types {
+            [a, b] if a.name() == b.name() => Some(self.unit.clone()),
+            _ => None,
+        }
     }
 
-    fn apply(&self, values: &[Value], _egraph: &EGraph) -> Option<Value> {
+    fn apply(&self, values: &[Value]) -> Option<Value> {
         (values[0] != values[1]).then(Value::unit)
     }
 }

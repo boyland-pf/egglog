@@ -46,7 +46,7 @@
 (rule ((= e (Let var e1 e2))
        (= (freer e1) fv1)
        (= (freer e2) fv2))
-      ((set (freer e) (set-union fv1 (set-remove fv2 var)))))
+      ((set (freer e) (set-union (set-remove fv1 var) fv2))))
 (rule ((= e (Fix var body))
        (= (freer body) fv))
       ((set (freer e) (set-remove fv var))))
@@ -128,6 +128,8 @@
        (set-contains fvs v2))
       ((union expr (Lam (From expr) (Let v1 e (Let v2 (Var (From expr)) body))))))
 
+(relation result ())
+
 ;; lambda_under
 (push)
 (let e 
@@ -197,7 +199,17 @@
     (Let (V "add1") (Lam (V "y") (Add (Var (V "y")) (Val (Num 1))))
     (App (App (Var (V "compose")) (Var (V "add1"))) (Var (V "add1"))))))
 (run 20)
-(check (= e7 (Lam x (Add (Var x) (Val (Num 2))))))
+
+(rule (
+    (= goal1 (Lam x (Add (Val (Num 1))
+                         (App (Lam y (Add (Val (Num 1)) (Var y)))
+                              (Var x)))))
+    (= goal2 (Lam x (Add (Var x) (Val (Num 2)))))
+)(
+    (result)
+))
+(run 1)
+(check (result))
 (pop)
 
 ;; lambda_if_simple
@@ -222,7 +234,13 @@
                                   (Var (V "add1")))))))))))
 
 (run 30)
-(check (= e11 (Lam x (Add (Var x) (Val (Num 7))))))
+(rule (
+    (= e11 (Lam x (Add (Var x) (Val (Num 7)))))
+)(
+    (result)
+))
+(run 1)
+(check (result))
 (pop)
 
 ;; lambda_if

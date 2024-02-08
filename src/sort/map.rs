@@ -1,8 +1,6 @@
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
-use crate::constraint::{AllEqualTypeConstraint, SimpleTypeConstraint};
-
 use super::*;
 
 type ValueMap = BTreeMap<Value, Value>;
@@ -16,12 +14,8 @@ pub struct MapSort {
 }
 
 impl MapSort {
-    fn key(&self) -> ArcSort {
-        self.key.clone()
-    }
-
-    fn value(&self) -> ArcSort {
-        self.value.clone()
+    fn kv_names(&self) -> (Symbol, Symbol) {
+        (self.key.name(), self.value.name())
     }
 
     pub fn make_sort(
@@ -29,7 +23,7 @@ impl MapSort {
         name: Symbol,
         args: &[Expr],
     ) -> Result<ArcSort, TypeError> {
-        if let [Expr::Var((), k), Expr::Var((), v)] = args {
+        if let [Expr::Var(k), Expr::Var(v)] = args {
             let k = typeinfo.sorts.get(k).ok_or(TypeError::UndefinedSort(*k))?;
             let v = typeinfo.sorts.get(v).ok_or(TypeError::UndefinedSort(*v))?;
 
@@ -54,14 +48,12 @@ impl MapSort {
 impl MapSort {
     pub fn presort_names() -> Vec<Symbol> {
         vec![
-            "rebuild".into(),
             "map-empty".into(),
             "map-insert".into(),
             "map-get".into(),
             "map-not-contains".into(),
             "map-contains".into(),
             "map-remove".into(),
-            "map-length".into(),
         ]
     }
 }
@@ -94,29 +86,11 @@ impl Sort for MapSort {
         result
     }
 
-    fn canonicalize(&self, value: &mut Value, unionfind: &UnionFind) -> bool {
-        let maps = self.maps.lock().unwrap();
-        let map = maps.get_index(value.bits as usize).unwrap();
-        let mut changed = false;
-        let new_map: ValueMap = map
-            .iter()
-            .map(|(k, v)| {
-                let (mut k, mut v) = (*k, *v);
-                changed |= self.key.canonicalize(&mut k, unionfind);
-                changed |= self.value.canonicalize(&mut v, unionfind);
-                (k, v)
-            })
-            .collect();
-        drop(maps);
-        *value = new_map.store(self).unwrap();
-        changed
+    fn canonicalize(&self, _value: &mut Value, _unionfind: &UnionFind) -> bool {
+        false
     }
 
     fn register_primitives(self: Arc<Self>, typeinfo: &mut TypeInfo) {
-        typeinfo.add_primitive(MapRebuild {
-            name: "rebuild".into(),
-            map: self.clone(),
-        });
         typeinfo.add_primitive(Ctor {
             name: "map-empty".into(),
             map: self.clone(),
@@ -132,20 +106,15 @@ impl Sort for MapSort {
         typeinfo.add_primitive(NotContains {
             name: "map-not-contains".into(),
             map: self.clone(),
-            unit: typeinfo.get_sort_nofail(),
+            unit: typeinfo.get_sort(),
         });
         typeinfo.add_primitive(Contains {
             name: "map-contains".into(),
             map: self.clone(),
-            unit: typeinfo.get_sort_nofail(),
+            unit: typeinfo.get_sort(),
         });
         typeinfo.add_primitive(Remove {
             name: "map-remove".into(),
-            map: self.clone(),
-        });
-        typeinfo.add_primitive(Length {
-            name: "map-length".into(),
-            i64: typeinfo.get_sort_nofail(),
             map: self,
         });
     }
@@ -200,41 +169,11 @@ impl FromSort for ValueMap {
     }
 }
 
-struct MapRebuild {
-    name: Symbol,
-    map: Arc<MapSort>,
-}
-
-impl PrimitiveLike for MapRebuild {
-    fn name(&self) -> Symbol {
-        self.name
-    }
-
-    fn get_type_constraints(&self) -> Box<dyn TypeConstraint> {
-        SimpleTypeConstraint::new(self.name(), vec![self.map.clone(), self.map.clone()]).into_box()
-    }
-
-    fn apply(&self, values: &[Value], egraph: &EGraph) -> Option<Value> {
-        let maps = self.map.maps.lock().unwrap();
-        let map = maps.get_index(values[0].bits as usize).unwrap();
-        let new_map: ValueMap = map
-            .iter()
-            .map(|(k, v)| (egraph.find(*k), egraph.find(*v)))
-            .collect();
-
-        drop(maps);
-
-        let res = new_map.store(&self.map).unwrap();
-        Some(res)
-    }
-}
-
 struct Ctor {
     name: Symbol,
     map: Arc<MapSort>,
 }
 
-// TODO: move term ordering min/max to its own mod
 pub(crate) struct TermOrderingMin {}
 
 impl PrimitiveLike for TermOrderingMin {
@@ -242,13 +181,14 @@ impl PrimitiveLike for TermOrderingMin {
         "ordering-min".into()
     }
 
-    fn get_type_constraints(&self) -> Box<dyn TypeConstraint> {
-        AllEqualTypeConstraint::new(self.name())
-            .with_exact_length(3)
-            .into_box()
+    fn accept(&self, types: &[ArcSort]) -> Option<ArcSort> {
+        match types {
+            [a, b] if a.name() == b.name() => Some(a.clone()),
+            _ => None,
+        }
     }
 
-    fn apply(&self, values: &[Value], _egraph: &EGraph) -> Option<Value> {
+    fn apply(&self, values: &[Value]) -> Option<Value> {
         assert_eq!(values.len(), 2);
         if values[0] < values[1] {
             Some(values[0])
@@ -265,13 +205,14 @@ impl PrimitiveLike for TermOrderingMax {
         "ordering-max".into()
     }
 
-    fn get_type_constraints(&self) -> Box<dyn TypeConstraint> {
-        AllEqualTypeConstraint::new(self.name())
-            .with_exact_length(3)
-            .into_box()
+    fn accept(&self, types: &[ArcSort]) -> Option<ArcSort> {
+        match types {
+            [a, b] if a.name() == b.name() => Some(a.clone()),
+            _ => None,
+        }
     }
 
-    fn apply(&self, values: &[Value], _egraph: &EGraph) -> Option<Value> {
+    fn apply(&self, values: &[Value]) -> Option<Value> {
         assert_eq!(values.len(), 2);
         if values[0] > values[1] {
             Some(values[0])
@@ -286,11 +227,14 @@ impl PrimitiveLike for Ctor {
         self.name
     }
 
-    fn get_type_constraints(&self) -> Box<dyn TypeConstraint> {
-        SimpleTypeConstraint::new(self.name(), vec![self.map.clone()]).into_box()
+    fn accept(&self, types: &[ArcSort]) -> Option<ArcSort> {
+        match types {
+            [] => Some(self.map.clone()),
+            _ => None,
+        }
     }
 
-    fn apply(&self, values: &[Value], _egraph: &EGraph) -> Option<Value> {
+    fn apply(&self, values: &[Value]) -> Option<Value> {
         assert!(values.is_empty());
         ValueMap::default().store(&self.map)
     }
@@ -306,20 +250,19 @@ impl PrimitiveLike for Insert {
         self.name
     }
 
-    fn get_type_constraints(&self) -> Box<dyn TypeConstraint> {
-        SimpleTypeConstraint::new(
-            self.name(),
-            vec![
-                self.map.clone(),
-                self.map.key(),
-                self.map.value(),
-                self.map.clone(),
-            ],
-        )
-        .into_box()
+    fn accept(&self, types: &[ArcSort]) -> Option<ArcSort> {
+        match types {
+            [map, key, value]
+                if (map.name(), (key.name(), value.name()))
+                    == (self.map.name, self.map.kv_names()) =>
+            {
+                Some(self.map.clone())
+            }
+            _ => None,
+        }
     }
 
-    fn apply(&self, values: &[Value], _egraph: &EGraph) -> Option<Value> {
+    fn apply(&self, values: &[Value]) -> Option<Value> {
         let mut map = ValueMap::load(&self.map, &values[0]);
         map.insert(values[1], values[2]);
         map.store(&self.map)
@@ -336,15 +279,16 @@ impl PrimitiveLike for Get {
         self.name
     }
 
-    fn get_type_constraints(&self) -> Box<dyn TypeConstraint> {
-        SimpleTypeConstraint::new(
-            self.name(),
-            vec![self.map.clone(), self.map.key(), self.map.value()],
-        )
-        .into_box()
+    fn accept(&self, types: &[ArcSort]) -> Option<ArcSort> {
+        match types {
+            [map, key] if (map.name(), key.name()) == (self.map.name, self.map.key.name()) => {
+                Some(self.map.value.clone())
+            }
+            _ => None,
+        }
     }
 
-    fn apply(&self, values: &[Value], _egraph: &EGraph) -> Option<Value> {
+    fn apply(&self, values: &[Value]) -> Option<Value> {
         let map = ValueMap::load(&self.map, &values[0]);
         map.get(&values[1]).copied()
     }
@@ -361,15 +305,16 @@ impl PrimitiveLike for NotContains {
         self.name
     }
 
-    fn get_type_constraints(&self) -> Box<dyn TypeConstraint> {
-        SimpleTypeConstraint::new(
-            self.name(),
-            vec![self.map.clone(), self.map.key(), self.unit.clone()],
-        )
-        .into_box()
+    fn accept(&self, types: &[ArcSort]) -> Option<ArcSort> {
+        match types {
+            [map, key] if (map.name(), key.name()) == (self.map.name, self.map.key.name()) => {
+                Some(self.unit.clone())
+            }
+            _ => None,
+        }
     }
 
-    fn apply(&self, values: &[Value], _egraph: &EGraph) -> Option<Value> {
+    fn apply(&self, values: &[Value]) -> Option<Value> {
         let map = ValueMap::load(&self.map, &values[0]);
         if map.contains_key(&values[1]) {
             None
@@ -390,15 +335,16 @@ impl PrimitiveLike for Contains {
         self.name
     }
 
-    fn get_type_constraints(&self) -> Box<dyn TypeConstraint> {
-        SimpleTypeConstraint::new(
-            self.name(),
-            vec![self.map.clone(), self.map.key(), self.unit.clone()],
-        )
-        .into_box()
+    fn accept(&self, types: &[ArcSort]) -> Option<ArcSort> {
+        match types {
+            [map, key] if (map.name(), key.name()) == (self.map.name, self.map.key.name()) => {
+                Some(self.unit.clone())
+            }
+            _ => None,
+        }
     }
 
-    fn apply(&self, values: &[Value], _egraph: &EGraph) -> Option<Value> {
+    fn apply(&self, values: &[Value]) -> Option<Value> {
         let map = ValueMap::load(&self.map, &values[0]);
         if map.contains_key(&values[1]) {
             Some(Value::unit())
@@ -418,38 +364,18 @@ impl PrimitiveLike for Remove {
         self.name
     }
 
-    fn get_type_constraints(&self) -> Box<dyn TypeConstraint> {
-        SimpleTypeConstraint::new(
-            self.name(),
-            vec![self.map.clone(), self.map.key(), self.map.clone()],
-        )
-        .into_box()
+    fn accept(&self, types: &[ArcSort]) -> Option<ArcSort> {
+        match types {
+            [map, key] if (map.name(), key.name()) == (self.map.name, self.map.key.name()) => {
+                Some(self.map.clone())
+            }
+            _ => None,
+        }
     }
 
-    fn apply(&self, values: &[Value], _egraph: &EGraph) -> Option<Value> {
+    fn apply(&self, values: &[Value]) -> Option<Value> {
         let mut map = ValueMap::load(&self.map, &values[0]);
         map.remove(&values[1]);
         map.store(&self.map)
-    }
-}
-
-struct Length {
-    name: Symbol,
-    map: Arc<MapSort>,
-    i64: Arc<I64Sort>,
-}
-
-impl PrimitiveLike for Length {
-    fn name(&self) -> Symbol {
-        self.name
-    }
-
-    fn get_type_constraints(&self) -> Box<dyn TypeConstraint> {
-        SimpleTypeConstraint::new(self.name(), vec![self.map.clone(), self.i64.clone()]).into_box()
-    }
-
-    fn apply(&self, values: &[Value], _egraph: &EGraph) -> Option<Value> {
-        let map = ValueMap::load(&self.map, &values[0]);
-        Some(Value::from(map.len() as i64))
     }
 }

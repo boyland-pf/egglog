@@ -20,25 +20,16 @@ pub struct Extractor<'a> {
 }
 
 impl EGraph {
-    /// This example uses [`EGraph::extract`] to extract a term. The example is
-    /// trivial, as there is only a single variant of the expression in the
-    /// egraph.
-    /// ```
-    /// use egglog::{EGraph, TermDag};
-    /// let mut egraph = EGraph::default();
-    /// egraph
-    ///     .parse_and_run_program(
-    ///         "(datatype Op (Add i64 i64))
-    ///          (let expr (Add 1 1))",
-    ///     )
-    ///     .unwrap();
-    /// let mut termdag = TermDag::default();
-    /// let (sort, value) = egraph
-    ///     .eval_expr(&egglog::ast::Expr::Var((), "expr".into()))
-    ///     .unwrap();
-    /// let (_, extracted) = egraph.extract(value, &mut termdag, &sort);
-    /// assert_eq!(termdag.to_string(&extracted), "(Add 1 1)");
-    /// ```
+    pub fn value_to_id(&self, value: Value) -> Option<(Symbol, Id)> {
+        if let Some(sort) = self.get_sort(&value) {
+            if sort.is_eq_sort() {
+                let id = Id::from(value.bits as usize);
+                return Some((sort.name(), self.find(id)));
+            }
+        }
+        None
+    }
+
     pub fn extract(&self, value: Value, termdag: &mut TermDag, arcsort: &ArcSort) -> (Cost, Term) {
         let extractor = Extractor::new(self, termdag);
         extractor
@@ -54,7 +45,7 @@ impl EGraph {
                                 "{:?}",
                                 inputs
                                     .iter()
-                                    .map(|input| extractor.costs.get(&extractor.find_id(*input)))
+                                    .map(|input| extractor.costs.get(&extractor.find(input)))
                                     .collect::<Vec<_>>()
                             );
                         }
@@ -71,7 +62,8 @@ impl EGraph {
         limit: usize,
         termdag: &mut TermDag,
     ) -> Vec<Term> {
-        let output_value = self.find(value);
+        let (tag, id) = self.value_to_id(value).unwrap();
+        let output_value = &Value::from_id(tag, id);
         let ext = &Extractor::new(self, termdag);
         ext.ctors
             .iter()
@@ -84,12 +76,13 @@ impl EGraph {
 
                 func.nodes
                     .iter()
-                    .filter(|&(_inputs, output)| (output.value == output_value))
-                    .map(|(inputs, _output)| {
-                        let node = Node { sym, inputs };
-                        ext.expr_from_node(&node, termdag).expect(
-                            "extract_variants should be called after extractor initialization",
-                        )
+                    .filter_map(|(inputs, output)| {
+                        (&output.value == output_value).then(|| {
+                            let node = Node { sym, inputs };
+                            ext.expr_from_node(&node, termdag).expect(
+                                "extract_variants should be called after extractor initialization",
+                            )
+                        })
                     })
                     .collect()
             })
@@ -123,7 +116,7 @@ impl<'a> Extractor<'a> {
     fn expr_from_node(&self, node: &Node, termdag: &mut TermDag) -> Option<Term> {
         let mut children = vec![];
         for value in node.inputs {
-            let arcsort = self.egraph.get_sort_from_value(value).unwrap();
+            let arcsort = self.egraph.get_sort(value).unwrap();
             children.push(self.find_best(*value, termdag, arcsort)?.1)
         }
 
@@ -137,7 +130,7 @@ impl<'a> Extractor<'a> {
         sort: &ArcSort,
     ) -> Option<(Cost, Term)> {
         if sort.is_eq_sort() {
-            let id = self.find_id(value);
+            let id = self.find(&value);
             let (cost, node) = self.costs.get(&id)?.clone();
             Some((cost, node))
         } else {
@@ -163,12 +156,8 @@ impl<'a> Extractor<'a> {
         Some((terms, cost))
     }
 
-    fn find(&self, value: Value) -> Value {
-        self.egraph.find(value)
-    }
-
-    fn find_id(&self, value: Value) -> Id {
-        Id::from(self.find(value).bits as usize)
+    fn find(&self, value: &Value) -> Id {
+        self.egraph.find(Id::from(value.bits as usize))
     }
 
     fn find_costs(&mut self, termdag: &mut TermDag) {
@@ -185,7 +174,7 @@ impl<'a> Extractor<'a> {
                         {
                             let make_new_pair = || (new_cost, termdag.app(sym, term_inputs));
 
-                            let id = self.find_id(output.value);
+                            let id = self.find(&output.value);
                             match self.costs.entry(id) {
                                 Entry::Vacant(e) => {
                                     did_something = true;

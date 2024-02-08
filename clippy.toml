@@ -14,5 +14,3 @@ disallowed-macros = [
     "std::eprint",
     "std::eprintln",
 ]
-
-type-complexity-threshold = 350

@@ -11,7 +11,7 @@
 
 (run 20)
 
-(print-function f 100)
+(print-table f)
 (check (= (f 10) 10))
 
 (datatype Value (Num i64))
@@ -36,5 +36,5 @@
 
 (run 20)
 
-(print-function fib 100)
+(print-table fib)
 (check (= (fib (Num 10)) (Num 55)))

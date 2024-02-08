@@ -1,4 +1,4 @@
-use crate::{ast::Literal, constraint::AllEqualTypeConstraint};
+use crate::ast::Literal;
 
 use super::*;
 
@@ -54,12 +54,6 @@ impl Sort for I64Sort {
         add_primitives!(typeinfo, "<=" = |a: i64, b: i64| -> Opt { (a <= b).then(|| ()) });
         add_primitives!(typeinfo, ">=" = |a: i64, b: i64| -> Opt { (a >= b).then(|| ()) });
 
-        add_primitives!(typeinfo, "bool-=" = |a: i64, b: i64| -> bool { a == b });
-        add_primitives!(typeinfo, "bool-<" = |a: i64, b: i64| -> bool { a < b });
-        add_primitives!(typeinfo, "bool->" = |a: i64, b: i64| -> bool { a > b });
-        add_primitives!(typeinfo, "bool-<=" = |a: i64, b: i64| -> bool { a <= b });
-        add_primitives!(typeinfo, "bool->=" = |a: i64, b: i64| -> bool { a >= b });
-
         add_primitives!(typeinfo, "min" = |a: i64, b: i64| -> i64 { a.min(b) });
         add_primitives!(typeinfo, "max" = |a: i64, b: i64| -> i64 { a.max(b) });
 
@@ -68,7 +62,7 @@ impl Sort for I64Sort {
         // Must be in the i64 sort register function because the string sort is registered before the i64 sort.
         typeinfo.add_primitive(CountMatches {
             name: "count-matches".into(),
-            string: typeinfo.get_sort_nofail(),
+            string: typeinfo.get_sort(),
             int: self.clone(),
         });
 
@@ -76,7 +70,7 @@ impl Sort for I64Sort {
 
     fn make_expr(&self, _egraph: &EGraph, value: Value) -> (Cost, Expr) {
         assert!(value.tag == self.name());
-        (1, Expr::Lit((), Literal::Int(value.bits as _)))
+        (1, Expr::Lit(Literal::Int(value.bits as _)))
     }
 }
 
@@ -108,15 +102,18 @@ impl PrimitiveLike for CountMatches {
         self.name
     }
 
-    fn get_type_constraints(&self) -> Box<dyn TypeConstraint> {
-        AllEqualTypeConstraint::new(self.name())
-            .with_all_arguments_sort(self.string.clone())
-            .with_exact_length(3)
-            .with_output_sort(self.int.clone())
-            .into_box()
+    fn accept(&self, types: &[ArcSort]) -> Option<ArcSort> {
+        if types.len() == 2
+            && types[0].name() == self.string.name
+            && types[1].name() == self.string.name
+        {
+            Some(self.int.clone())
+        } else {
+            None
+        }
     }
 
-    fn apply(&self, values: &[Value], _egraph: &EGraph) -> Option<Value> {
+    fn apply(&self, values: &[Value]) -> Option<Value> {
         let string1 = Symbol::load(&self.string, &values[0]).to_string();
         let string2 = Symbol::load(&self.string, &values[1]).to_string();
         Some(Value::from(string1.matches(&string2).count() as i64))

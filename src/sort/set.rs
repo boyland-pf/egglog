@@ -1,8 +1,6 @@
 use std::collections::BTreeSet;
 use std::sync::Mutex;
 
-use crate::constraint::{AllEqualTypeConstraint, SimpleTypeConstraint};
-
 use super::*;
 
 type ValueSet = BTreeSet<Value>;
@@ -15,10 +13,6 @@ pub struct SetSort {
 }
 
 impl SetSort {
-    pub fn element(&self) -> ArcSort {
-        self.element.clone()
-    }
-
     pub fn element_name(&self) -> Symbol {
         self.element.name()
     }
@@ -28,7 +22,7 @@ impl SetSort {
         name: Symbol,
         args: &[Expr],
     ) -> Result<ArcSort, TypeError> {
-        if let [Expr::Var((), e)] = args {
+        if let [Expr::Var(e)] = args {
             let e = typeinfo.sorts.get(e).ok_or(TypeError::UndefinedSort(*e))?;
 
             if e.is_eq_container_sort() {
@@ -60,8 +54,6 @@ impl SetSort {
             "set-union".into(),
             "set-diff".into(),
             "set-intersect".into(),
-            "set-get".into(),
-            "set-length".into(),
         ]
     }
 }
@@ -94,28 +86,11 @@ impl Sort for SetSort {
         result
     }
 
-    fn canonicalize(&self, value: &mut Value, unionfind: &UnionFind) -> bool {
-        let sets = self.sets.lock().unwrap();
-        let set = sets.get_index(value.bits as usize).unwrap();
-        let mut changed = false;
-        let new_set: ValueSet = set
-            .iter()
-            .map(|e| {
-                let mut e = *e;
-                changed |= self.element.canonicalize(&mut e, unionfind);
-                e
-            })
-            .collect();
-        drop(sets);
-        *value = new_set.store(self).unwrap();
-        changed
+    fn canonicalize(&self, _value: &mut Value, _unionfind: &UnionFind) -> bool {
+        false
     }
 
     fn register_primitives(self: Arc<Self>, typeinfo: &mut TypeInfo) {
-        typeinfo.add_primitive(SetRebuild {
-            name: "rebuild".into(),
-            set: self.clone(),
-        });
         typeinfo.add_primitive(SetOf {
             name: "set-of".into(),
             set: self.clone(),
@@ -131,26 +106,16 @@ impl Sort for SetSort {
         typeinfo.add_primitive(NotContains {
             name: "set-not-contains".into(),
             set: self.clone(),
-            unit: typeinfo.get_sort_nofail(),
+            unit: typeinfo.get_sort(),
         });
         typeinfo.add_primitive(Contains {
             name: "set-contains".into(),
             set: self.clone(),
-            unit: typeinfo.get_sort_nofail(),
+            unit: typeinfo.get_sort(),
         });
         typeinfo.add_primitive(Remove {
             name: "set-remove".into(),
             set: self.clone(),
-        });
-        typeinfo.add_primitive(Get {
-            name: "set-get".into(),
-            set: self.clone(),
-            i64: typeinfo.get_sort_nofail(),
-        });
-        typeinfo.add_primitive(Length {
-            name: "set-length".into(),
-            set: self.clone(),
-            i64: typeinfo.get_sort_nofail(),
         });
         typeinfo.add_primitive(Union {
             name: "set-union".into(),
@@ -222,14 +187,15 @@ impl PrimitiveLike for SetOf {
         self.name
     }
 
-    fn get_type_constraints(&self) -> Box<dyn TypeConstraint> {
-        AllEqualTypeConstraint::new(self.name())
-            .with_all_arguments_sort(self.set.element())
-            .with_output_sort(self.set.clone())
-            .into_box()
+    fn accept(&self, types: &[ArcSort]) -> Option<ArcSort> {
+        if types.iter().all(|t| t.name() == self.set.element_name()) {
+            Some(self.set.clone())
+        } else {
+            None
+        }
     }
 
-    fn apply(&self, values: &[Value], _egraph: &EGraph) -> Option<Value> {
+    fn apply(&self, values: &[Value]) -> Option<Value> {
         let set = ValueSet::from_iter(values.iter().copied());
         Some(set.store(&self.set).unwrap())
     }
@@ -245,36 +211,16 @@ impl PrimitiveLike for Ctor {
         self.name
     }
 
-    fn get_type_constraints(&self) -> Box<dyn TypeConstraint> {
-        SimpleTypeConstraint::new(self.name(), vec![self.set.clone()]).into_box()
+    fn accept(&self, types: &[ArcSort]) -> Option<ArcSort> {
+        match types {
+            [] => Some(self.set.clone()),
+            _ => None,
+        }
     }
 
-    fn apply(&self, values: &[Value], _egraph: &EGraph) -> Option<Value> {
+    fn apply(&self, values: &[Value]) -> Option<Value> {
         assert!(values.is_empty());
         ValueSet::default().store(&self.set)
-    }
-}
-
-struct SetRebuild {
-    name: Symbol,
-    set: Arc<SetSort>,
-}
-
-impl PrimitiveLike for SetRebuild {
-    fn name(&self) -> Symbol {
-        self.name
-    }
-
-    fn get_type_constraints(&self) -> Box<dyn TypeConstraint> {
-        SimpleTypeConstraint::new(self.name(), vec![self.set.clone(), self.set.clone()]).into_box()
-    }
-
-    fn apply(&self, values: &[Value], egraph: &EGraph) -> Option<Value> {
-        let set = ValueSet::load(&self.set, &values[0]);
-        let new_set: ValueSet = set.iter().map(|e| egraph.find(*e)).collect();
-        // drop set to make sure we lose lock
-        drop(set);
-        new_set.store(&self.set)
     }
 }
 
@@ -288,15 +234,16 @@ impl PrimitiveLike for Insert {
         self.name
     }
 
-    fn get_type_constraints(&self) -> Box<dyn TypeConstraint> {
-        SimpleTypeConstraint::new(
-            self.name(),
-            vec![self.set.clone(), self.set.element(), self.set.clone()],
-        )
-        .into_box()
+    fn accept(&self, types: &[ArcSort]) -> Option<ArcSort> {
+        match types {
+            [set, key] if (set.name(), key.name()) == (self.set.name, self.set.element_name()) => {
+                Some(self.set.clone())
+            }
+            _ => None,
+        }
     }
 
-    fn apply(&self, values: &[Value], _egraph: &EGraph) -> Option<Value> {
+    fn apply(&self, values: &[Value]) -> Option<Value> {
         let mut set = ValueSet::load(&self.set, &values[0]);
         set.insert(values[1]);
         set.store(&self.set)
@@ -314,15 +261,18 @@ impl PrimitiveLike for NotContains {
         self.name
     }
 
-    fn get_type_constraints(&self) -> Box<dyn TypeConstraint> {
-        SimpleTypeConstraint::new(
-            self.name(),
-            vec![self.set.clone(), self.set.element(), self.unit.clone()],
-        )
-        .into_box()
+    fn accept(&self, types: &[ArcSort]) -> Option<ArcSort> {
+        match types {
+            [set, element]
+                if (set.name(), element.name()) == (self.set.name, self.set.element_name()) =>
+            {
+                Some(self.unit.clone())
+            }
+            _ => None,
+        }
     }
 
-    fn apply(&self, values: &[Value], _egraph: &EGraph) -> Option<Value> {
+    fn apply(&self, values: &[Value]) -> Option<Value> {
         let set = ValueSet::load(&self.set, &values[0]);
         if set.contains(&values[1]) {
             None
@@ -343,15 +293,16 @@ impl PrimitiveLike for Contains {
         self.name
     }
 
-    fn get_type_constraints(&self) -> Box<dyn TypeConstraint> {
-        SimpleTypeConstraint::new(
-            self.name(),
-            vec![self.set.clone(), self.set.element(), self.unit.clone()],
-        )
-        .into_box()
+    fn accept(&self, types: &[ArcSort]) -> Option<ArcSort> {
+        match types {
+            [set, key] if (set.name(), key.name()) == (self.set.name, self.set.element_name()) => {
+                Some(self.unit.clone())
+            }
+            _ => None,
+        }
     }
 
-    fn apply(&self, values: &[Value], _egraph: &EGraph) -> Option<Value> {
+    fn apply(&self, values: &[Value]) -> Option<Value> {
         let set = ValueSet::load(&self.set, &values[0]);
         if set.contains(&values[1]) {
             Some(Value::unit())
@@ -371,15 +322,16 @@ impl PrimitiveLike for Union {
         self.name
     }
 
-    fn get_type_constraints(&self) -> Box<dyn TypeConstraint> {
-        SimpleTypeConstraint::new(
-            self.name(),
-            vec![self.set.clone(), self.set.clone(), self.set.clone()],
-        )
-        .into_box()
+    fn accept(&self, types: &[ArcSort]) -> Option<ArcSort> {
+        match types {
+            [set1, set2] if set1.name() == self.set.name() && set2.name() == self.set.name() => {
+                Some(self.set.clone())
+            }
+            _ => None,
+        }
     }
 
-    fn apply(&self, values: &[Value], _egraph: &EGraph) -> Option<Value> {
+    fn apply(&self, values: &[Value]) -> Option<Value> {
         let mut set1 = ValueSet::load(&self.set, &values[0]);
         let set2 = ValueSet::load(&self.set, &values[1]);
         set1.extend(set2.iter());
@@ -397,66 +349,21 @@ impl PrimitiveLike for Intersect {
         self.name
     }
 
-    fn get_type_constraints(&self) -> Box<dyn TypeConstraint> {
-        SimpleTypeConstraint::new(
-            self.name(),
-            vec![self.set.clone(), self.set.clone(), self.set.clone()],
-        )
-        .into_box()
+    fn accept(&self, types: &[ArcSort]) -> Option<ArcSort> {
+        match types {
+            [set1, set2] if set1.name() == self.set.name && set2.name() == self.set.name() => {
+                Some(self.set.clone())
+            }
+            _ => None,
+        }
     }
 
-    fn apply(&self, values: &[Value], _egraph: &EGraph) -> Option<Value> {
+    fn apply(&self, values: &[Value]) -> Option<Value> {
         let mut set1 = ValueSet::load(&self.set, &values[0]);
         let set2 = ValueSet::load(&self.set, &values[1]);
         set1.retain(|k| set2.contains(k));
         // set.insert(values[1], values[2]);
         set1.store(&self.set)
-    }
-}
-
-struct Length {
-    name: Symbol,
-    set: Arc<SetSort>,
-    i64: Arc<I64Sort>,
-}
-
-impl PrimitiveLike for Length {
-    fn name(&self) -> Symbol {
-        self.name
-    }
-
-    fn get_type_constraints(&self) -> Box<dyn TypeConstraint> {
-        SimpleTypeConstraint::new(self.name(), vec![self.set.clone(), self.i64.clone()]).into_box()
-    }
-
-    fn apply(&self, values: &[Value], _egraph: &EGraph) -> Option<Value> {
-        let set = ValueSet::load(&self.set, &values[0]);
-        Some(Value::from(set.len() as i64))
-    }
-}
-struct Get {
-    name: Symbol,
-    set: Arc<SetSort>,
-    i64: Arc<I64Sort>,
-}
-
-impl PrimitiveLike for Get {
-    fn name(&self) -> Symbol {
-        self.name
-    }
-
-    fn get_type_constraints(&self) -> Box<dyn TypeConstraint> {
-        SimpleTypeConstraint::new(
-            self.name(),
-            vec![self.set.clone(), self.i64.clone(), self.set.element()],
-        )
-        .into_box()
-    }
-
-    fn apply(&self, values: &[Value], _egraph: &EGraph) -> Option<Value> {
-        let set = ValueSet::load(&self.set, &values[0]);
-        let index = i64::load(&self.i64, &values[1]);
-        set.iter().nth(index as usize).copied()
     }
 }
 
@@ -470,15 +377,16 @@ impl PrimitiveLike for Remove {
         self.name
     }
 
-    fn get_type_constraints(&self) -> Box<dyn TypeConstraint> {
-        SimpleTypeConstraint::new(
-            self.name(),
-            vec![self.set.clone(), self.set.element(), self.set.clone()],
-        )
-        .into_box()
+    fn accept(&self, types: &[ArcSort]) -> Option<ArcSort> {
+        match types {
+            [set, key] if (set.name(), key.name()) == (self.set.name, self.set.element_name()) => {
+                Some(self.set.clone())
+            }
+            _ => None,
+        }
     }
 
-    fn apply(&self, values: &[Value], _egraph: &EGraph) -> Option<Value> {
+    fn apply(&self, values: &[Value]) -> Option<Value> {
         let mut set = ValueSet::load(&self.set, &values[0]);
         set.remove(&values[1]);
         set.store(&self.set)
@@ -495,15 +403,16 @@ impl PrimitiveLike for Diff {
         self.name
     }
 
-    fn get_type_constraints(&self) -> Box<dyn TypeConstraint> {
-        SimpleTypeConstraint::new(
-            self.name(),
-            vec![self.set.clone(), self.set.clone(), self.set.clone()],
-        )
-        .into_box()
+    fn accept(&self, types: &[ArcSort]) -> Option<ArcSort> {
+        match types {
+            [set1, set2] if set1.name() == self.set.name && set2.name() == self.set.name() => {
+                Some(self.set.clone())
+            }
+            _ => None,
+        }
     }
 
-    fn apply(&self, values: &[Value], _egraph: &EGraph) -> Option<Value> {
+    fn apply(&self, values: &[Value]) -> Option<Value> {
         let mut set1 = ValueSet::load(&self.set, &values[0]);
         let set2 = ValueSet::load(&self.set, &values[1]);
         set1.retain(|k| !set2.contains(k));
