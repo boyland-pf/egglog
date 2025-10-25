@@ -61,6 +61,7 @@ pub use typechecking::TypeInfo;
 use unionfind::*;
 use util::*;
 pub use value::*;
+use std::cell::RefCell;
 
 pub type ArcSort = Arc<dyn Sort>;
 
@@ -162,25 +163,33 @@ impl Display for RunReport {
             search_time + apply_time
         });
 
-        for rule in all_rules_vec {
-            let truncated = Self::truncate_rule_name(*rule);
+        let num_rules = all_rules_vec.len();
+        for (i, rule) in all_rules_vec.iter().enumerate() {
+            // a rule name can be the rule itself, so replace newlines
+            let rule_name = if i == num_rules - 1 {
+                // don't truncate the last rule
+                rule.to_string().replace('\n', " ")
+            } else {
+                Self::truncate_rule_name(**rule)
+            };
+
             // print out the search and apply time for rule
             let search_time = self
                 .search_time_per_rule
-                .get(rule)
+                .get(*rule)
                 .cloned()
                 .unwrap_or(Duration::default())
                 .as_secs_f64();
             let apply_time = self
                 .apply_time_per_rule
-                .get(rule)
+                .get(*rule)
                 .cloned()
                 .unwrap_or(Duration::default())
                 .as_secs_f64();
-            let num_matches = self.num_matches_per_rule.get(rule).cloned().unwrap_or(0);
+            let num_matches = self.num_matches_per_rule.get(*rule).cloned().unwrap_or(0);
             writeln!(
                 f,
-                "Rule {truncated}: search {search_time:.3}s, apply {apply_time:.3}s, num matches {num_matches}",
+                "Rule {rule_name}: search {search_time:.3}s, apply {apply_time:.3}s, num matches {num_matches}",
             )?;
         }
 
@@ -439,7 +448,10 @@ pub struct EGraph {
     pub run_mode: RunMode,
     pub fact_directory: Option<PathBuf>,
     pub seminaive: bool,
+    pub no_recursive_size: bool,
     type_info: TypeInfo,
+    output_index: RefCell<HashMap<Value, Vec<(Symbol, usize)>>>,
+    output_index_timestamp: RefCell<u32>,
     extract_report: Option<ExtractReport>,
     /// The run report for the most recent run of a schedule.
     recent_run_report: Option<RunReport>,
@@ -463,10 +475,13 @@ impl Default for EGraph {
             interactive_mode: false,
             fact_directory: None,
             seminaive: true,
+            no_recursive_size: false,
             extract_report: None,
             recent_run_report: None,
             overall_run_report: Default::default(),
             msgs: Some(vec![]),
+            output_index: Default::default(),
+            output_index_timestamp: RefCell::new(u32::MAX),
             type_info: Default::default(),
         };
         egraph
@@ -794,7 +809,224 @@ impl EGraph {
         Ok(())
     }
 
-    pub fn print_size(&mut self, sym: Option<Symbol>) -> Result<(), Error> {
+    pub fn clear(&mut self) {
+        for f in self.functions.values_mut() {
+            f.clear();
+        }
+    }
+
+
+    /// Calculates the recursive size of all nodes in an e-class
+    pub fn print_size_recursive(&mut self, sym: Option<Symbol>) -> Result<(), Error> {
+        // Create a memoization map to avoid recalculating sizes
+        let mut memo = HashMap::default();
+
+        if let Some(sym) = sym {
+            // Calculate size for a specific function
+            let f = self
+                .functions
+                .get(&sym)
+                .ok_or(TypeError::UnboundFunction(sym, span!()))?;
+
+            let total_size = self.calculate_function_size(f, &mut memo);
+
+            log::info!("Recursive size of function {} is {}", sym, total_size);
+            self.print_msg(format!("Recursive size: {}", total_size));
+            Ok(())
+        } else {
+            // Calculate size for all functions
+            let mut sizes = Vec::new();
+
+            for (func_name, function) in &self.functions {
+                let func_size = self.calculate_function_size(function, &mut memo);
+                sizes.push((*func_name, func_size));
+            }
+
+            // Sort by function name
+            sizes.sort_by_key(|(name, _)| name.as_str());
+
+            for (sym, size) in &sizes {
+                log::info!("Recursive size of function {} is {}", sym, size);
+            }
+
+            self.print_msg(
+                sizes
+                    .into_iter()
+                    .map(|(name, size)| format!("{}: {}", name, size))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            );
+
+            Ok(())
+        }
+    }
+
+fn build_output_index(&self) {
+    // If the index is already up-to-date with the latest changes, do nothing.
+    if *self.output_index_timestamp.borrow() == self.timestamp {
+        return;
+    }
+
+    let mut new_index = HashMap::default();
+    for (func_name, function) in &self.functions {
+        // We iterate using iter_range with include_subsumed=true to get all possible nodes
+        for (offset, _inputs, output) in function.nodes.iter_range(0..function.nodes.num_offsets(), true) {
+            // Use the canonical value for indexing
+            let canonical_value = self.find(&function.schema.output, output.value);
+            new_index
+                .entry(canonical_value)
+                .or_insert_with(Vec::new)
+                .push((*func_name, offset));
+        }
+    }
+    // Update the index and the timestamp
+    *self.output_index.borrow_mut() = new_index;
+    *self.output_index_timestamp.borrow_mut() = self.timestamp;
+}
+
+pub fn print_size(&mut self, sym: Option<Symbol>, no_recursive_size: bool) -> Result<(), Error> {
+    // Create a memoization map to avoid recalculating sizes
+    let mut memo = HashMap::default();
+ 
+    if !no_recursive_size {
+        self.build_output_index();
+    }
+
+    if let Some(sym) = sym {
+        // Calculate both regular and recursive size for a specific function
+        let f = self
+            .functions
+            .get(&sym)
+            .ok_or(TypeError::UnboundFunction(sym, span!()))?;
+        
+        let tuple_count = f.nodes.len();
+
+        if !no_recursive_size {
+            let recursive_size = self.calculate_function_size(f, &mut memo);
+            log::info!("Function {} has {} tuples, recursive size {}", sym, tuple_count, recursive_size);
+            self.print_msg(format!("{} Tuples: {}\nRecursive size: {}", sym, tuple_count, recursive_size));
+        }
+        else {
+            log::info!("Function {} has {} tuples", sym, tuple_count);
+            self.print_msg(format!("{} Tuples: {}\n", sym, tuple_count));
+        }
+
+        Ok(())
+    } else {
+        // Calculate both regular and recursive sizes for all functions
+        assert!(no_recursive_size);
+        let mut sizes = Vec::new();
+        
+        for (func_name, function) in &self.functions {
+            let tuple_count = function.nodes.len();
+            let recursive_size = self.calculate_function_size(function, &mut memo);
+            sizes.push((*func_name, tuple_count, recursive_size));
+        }
+        
+        // Sort by function name's alphabetical order
+        sizes.sort_by_key(|(name, _, _)| name.as_str());
+        
+        for (sym, tuples, rec_size) in &sizes {
+            log::info!("Function {} has {} tuples, recursive size {}", sym, tuples, rec_size);
+        }
+        
+        self.print_msg(
+            sizes.into_iter()
+                .map(|(name, tuples, rec_size)| format!("{}: {} tuples, recursive size {}", name, tuples, rec_size))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        
+        Ok(())
+    }
+}
+
+/// Calculate the recursive size of a function by summing the sizes of all entries
+fn calculate_function_size(&self, function: &Function, memo: &mut HashMap<(Symbol, Value), usize>) -> usize {
+    let mut total_size = 0;
+    
+    for (inputs, output) in function.nodes.iter(true) {
+        let mut entry_size = 1;
+        
+        // Process each input
+        for (i, &input) in inputs.iter().enumerate() {
+            let input_sort = &function.schema.input[i];
+            entry_size *= self.calculate_node_size(input_sort, input, memo);
+        }
+        
+        // Process output
+        entry_size *= self.calculate_node_size(&function.schema.output, output.value, memo);
+        
+        total_size += entry_size;
+    }
+    
+    total_size
+}
+
+
+fn calculate_node_size(&self, sort: &ArcSort, value: Value, memo: &mut HashMap<(Symbol, Value), usize>) -> usize {
+    // For primitive sorts, return size 1
+    if sort.name() == "i64".into() || 
+       sort.name() == "f64".into() || 
+       sort.name() == "String".into() || 
+       sort.name() == "Unit".into() || 
+       sort.name() == "Bool".into() {
+        return 1;
+    }
+    
+    // For eq sorts, canonicalize the value
+    let canonical_value = if sort.is_eq_sort() {
+        self.find(sort, value)
+    } else {
+        value
+    };
+    
+    // Check memoization map
+    let key = (sort.name(), canonical_value);
+    if let Some(&size) = memo.get(&key) {
+        return size;
+    }
+    
+    // For non-primitive types, find all ways it could be constructed
+    let mut size = 0;
+
+    // Use the output_index for a fast lookup instead of iterating all functions
+    if let Some(constructors) = self.output_index.borrow().get(&canonical_value) {
+        for (func_name, offset) in constructors {
+            let function = &self.functions[func_name];
+            // Additional check to ensure we are using the right sort
+            if function.schema.output.name() != sort.name() {
+                continue;
+            }
+
+            // get_index is safe here because the index was just built
+            if let Some((inputs, _output)) = function.nodes.get_index(*offset, true) {
+                // Calculate the product of sizes of all inputs
+                let mut node_size = 1;
+                for (i, &input) in inputs.iter().enumerate() {
+                    let input_sort = &function.schema.input[i];
+                    node_size *= self.calculate_node_size(input_sort, input, memo);
+                }
+                
+                // Add this construction's size to the total
+                size += node_size;
+            }
+        }
+    }
+    
+    // If we couldn't find any constructors, this is a leaf node
+    if size == 0 {
+        size = 1;
+    }
+
+    // Store in memoization map
+    memo.insert(key, size);
+
+    size
+
+}
+
+    pub fn print_size_old(&mut self, sym: Option<Symbol>) -> Result<(), Error> {
         if let Some(sym) = sym {
             let f = self
                 .functions
@@ -1284,7 +1516,7 @@ impl EGraph {
                 })?;
             }
             ResolvedNCommand::PrintSize(span, f) => {
-                self.print_size(f).map_err(|e| match e {
+                self.print_size(f, self.no_recursive_size).map_err(|e| match e {
                     Error::TypeError(TypeError::UnboundFunction(f, _)) => {
                         Error::TypeError(TypeError::UnboundFunction(f, span.clone()))
                     }
@@ -1409,12 +1641,6 @@ impl EGraph {
         }
         log::info!("Read {num_facts} facts into {func_name} from '{file}'.");
         Ok(())
-    }
-
-    pub fn clear(&mut self) {
-        for f in self.functions.values_mut() {
-            f.clear();
-        }
     }
 
     pub fn set_reserved_symbol(&mut self, sym: Symbol) {

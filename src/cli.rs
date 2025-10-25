@@ -50,6 +50,9 @@ pub mod bin {
         /// Prevents egglog from printing messages
         #[clap(long)]
         no_messages: bool,
+        /// Turns off recursive size calculation for the `print-size` command
+        #[clap(long)]
+        no_recursive_size: bool,
     }
 
     #[allow(clippy::disallowed_macros)]
@@ -66,6 +69,7 @@ pub mod bin {
         egraph.fact_directory.clone_from(&args.fact_directory);
         egraph.seminaive = !args.naive;
         egraph.run_mode = args.show;
+        egraph.no_recursive_size = args.no_recursive_size;
         if args.no_messages {
             egraph.disable_messages();
         }
